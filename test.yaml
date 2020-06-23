@@ -1,0 +1,21 @@
+apiVersion: app.k8s.airparking.cn/v1
+kind: SpringBootApp
+metadata:
+  name: pmc-order
+  namespace: default
+spec:
+  imageRepo: "registry-vpc.cn-shenzhen.aliyuncs.com/ap_pmc"
+  appImage: "airparking-pmc-svc-dist:3.0.0"
+  livenessProbePath: /actuator/health
+  readinessProbePath: /actuator/health
+  minReplicas: 1
+  maxReplicas: 2
+  configMap: pmc-order-config
+  ports:
+    - containerPort: 8080
+      protocol: TCP
+  env:
+    - name: APP
+      value: "order"
+    - name: HEAP_SIZE
+      value: "536870912"

@@ -1,0 +1,7 @@
+domain: k8s.airparking.cn
+repo: github.com/cy18cn/spring-boot-operator
+resources:
+- group: app
+  kind: SpringBootApp
+  version: v1
+version: "2"

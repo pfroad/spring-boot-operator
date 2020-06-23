@@ -1,0 +1,7 @@
+apiVersion: app.k8s.airparking.cn/v1
+kind: SpringBootApp
+metadata:
+  name: springbootapp-sample
+spec:
+  # Add fields here
+  foo: bar
