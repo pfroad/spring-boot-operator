@@ -55,57 +55,90 @@ const (
 
 // +kubebuilder:rbac:groups=app.k8s.airparking.cn,resources=springbootapps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=app.k8s.airparking.cn,resources=springbootapps/status,verbs=get;update;patch
-
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments/status,verbs=get
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services/status,verbs=get
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers/status,verbs=get
 func (r *SpringBootAppReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	ctx := context.Background()
 	_ = r.Log.WithValues("springbootapp", req.NamespacedName)
 
-	instance := &appv1.SpringBootApp{}
-	if err := r.Get(ctx, req.NamespacedName, instance); err != nil {
+	springBootApp := &appv1.SpringBootApp{}
+	if err := r.Get(ctx, req.NamespacedName, springBootApp); err != nil {
 		if errors.IsNotFound(err) {
-			log.Error(err, "unable to found CronJob")
+			log.Error(err, "unable to found SpringBootAPP")
 			// Request object not found, could have been deleted after reconcile request.
 			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
 			// Return and don't requeue
 			return ctrl.Result{}, nil
 		}
-		// Error request get instance, requeue the request
+		// Error request get springBootApp, requeue the request
 		return ctrl.Result{}, err
 	}
 
 	labels := map[string]string{
-		"app":        instance.Name,
-		"version":    instance.Spec.Version,
-		"deployment": fmt.Sprintf("%s-deployment", instance.Name),
+		"app":        springBootApp.Name,
+		"version":    springBootApp.Spec.Version,
+		"deployment": fmt.Sprintf("%s-deployment", springBootApp.Name),
 	}
 
+	err := r.createOrUpdateDeployment(ctx, springBootApp, labels)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	err = r.createOrUpdaterService(ctx, springBootApp, labels)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	err = r.createOrUpdateHPA(ctx, springBootApp, labels)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *SpringBootAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&appv1.SpringBootApp{}).
+		Complete(r)
+}
+
+func (r *SpringBootAppReconciler) createOrUpdateDeployment(
+	ctx context.Context,
+	springBootApp *appv1.SpringBootApp,
+	labels map[string]string,
+) error {
 	// Define the desired Deployment object
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-%s", instance.Name, instance.Spec.Version),
-			Namespace: instance.Namespace,
+			Name:      fmt.Sprintf("%s-%s", springBootApp.Name, springBootApp.Spec.Version),
+			Namespace: springBootApp.Namespace,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
+			Replicas: springBootApp.Spec.MinReplicas,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
-					ImagePullSecrets: imagePullSecrets(instance.Spec.ImagePullSecrets),
 					Containers: []corev1.Container{
-						springBootContainer(instance),
+						springBootContainer(springBootApp),
 					},
-					Affinity: podAffinity(instance.Spec.PodAffinity, instance.Spec.PodAntiAffinity),
 					Volumes: []corev1.Volume{
 						{
 							Name: DefaultConfigVolumeName,
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: instance.Spec.ConfigMap,
+										Name: springBootApp.Spec.ConfigMap,
 									},
 								},
 							},
@@ -116,8 +149,18 @@ func (r *SpringBootAppReconciler) Reconcile(req ctrl.Request) (ctrl.Result, erro
 		},
 	}
 
-	if err := controllerutil.SetControllerReference(instance, deployment, r.Scheme); err != nil {
-		return ctrl.Result{}, err
+	imagePullSecrets := imagePullSecrets(springBootApp.Spec.ImagePullSecrets)
+	if imagePullSecrets != nil {
+		deployment.Spec.Template.Spec.ImagePullSecrets = imagePullSecrets
+	}
+
+	affinity := podAffinity(springBootApp.Spec.PodAffinity, springBootApp.Spec.PodAntiAffinity)
+	if affinity != nil {
+		deployment.Spec.Template.Spec.Affinity = affinity
+	}
+
+	if err := controllerutil.SetControllerReference(springBootApp, deployment, r.Scheme); err != nil {
+		return err
 	}
 
 	// check if deployment is existed
@@ -131,80 +174,7 @@ func (r *SpringBootAppReconciler) Reconcile(req ctrl.Request) (ctrl.Result, erro
 			log.Info("Creating Deployment", "namespace", deployment.Namespace, "name", deployment.Name)
 			err = r.Create(ctx, deployment)
 		}
-		return ctrl.Result{}, err
-	}
-
-	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      instance.Name,
-			Namespace: instance.Namespace,
-			Labels:    labels,
-		},
-		Spec: corev1.ServiceSpec{
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "http",
-					Port:       8080,
-					TargetPort: intstr.IntOrString{IntVal: 8080},
-				},
-			},
-			Selector: map[string]string{
-				"app": instance.Name,
-			},
-		},
-	}
-
-	foundedSvc := &corev1.Service{}
-	if err := r.Get(
-		ctx,
-		types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace},
-		foundedSvc,
-	); err != nil {
-		if errors.IsNotFound(err) {
-			log.Info("Creating Service", "namespace", deployment.Namespace, "name", deployment.Name)
-			err = r.Create(ctx, svc)
-		}
-		return ctrl.Result{}, err
-	}
-
-	// hpa
-	hpa := &autoscalingv1.HorizontalPodAutoscaler{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      instance.Name,
-			Namespace: instance.Namespace,
-		},
-		Spec: autoscalingv1.HorizontalPodAutoscalerSpec{
-			ScaleTargetRef: autoscalingv1.CrossVersionObjectReference{
-				Kind:       "Deployment",
-				Name:       instance.Name,
-				APIVersion: "apps/v1",
-			},
-		},
-	}
-
-	if instance.Spec.MinReplicas != nil {
-		hpa.Spec.MinReplicas = instance.Spec.MinReplicas
-	} else {
-		minReplicas := DefaultMinReplicas
-		hpa.Spec.MinReplicas = &minReplicas
-	}
-	if instance.Spec.MaxReplicas != nil {
-		hpa.Spec.MaxReplicas = *instance.Spec.MaxReplicas
-	} else {
-		hpa.Spec.MaxReplicas = DefaultMaxReplicas
-	}
-
-	foundedHPA := &autoscalingv1.HorizontalPodAutoscaler{}
-	if err := r.Get(
-		ctx,
-		types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace},
-		foundedHPA,
-	); err != nil {
-		if errors.IsNotFound(err) {
-			log.Info("Creating HorizontalPodAutoscaler", "namespace", deployment.Namespace, "name", deployment.Name)
-			err = r.Create(ctx, hpa)
-		}
-		return ctrl.Result{}, err
+		return err
 	}
 
 	// update the found object and write result back if it is changed
@@ -213,35 +183,150 @@ func (r *SpringBootAppReconciler) Reconcile(req ctrl.Request) (ctrl.Result, erro
 		log.Info("Updating deployment", "namespace", foundedDep.Namespace, "name", foundedDep.Name)
 		err := r.Update(ctx, foundedDep)
 		if err != nil {
-			return ctrl.Result{}, err
+			return err
 		}
 	}
 
-	if !reflect.DeepEqual(svc, foundedSvc) {
-		foundedSvc.Spec = svc.Spec
-		log.Info("Updating Service", "namespace", foundedDep.Namespace, "name", foundedDep.Name)
-		err := r.Update(ctx, foundedSvc)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	if !reflect.DeepEqual(hpa, foundedHPA) {
-		foundedHPA.Spec = hpa.Spec
-		log.Info("Updating Service", "namespace", foundedDep.Namespace, "name", foundedDep.Name)
-		err := r.Update(ctx, foundedHPA)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	return ctrl.Result{}, nil
+	return nil
 }
 
-func (r *SpringBootAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&appv1.SpringBootApp{}).
-		Complete(r)
+func (r *SpringBootAppReconciler) createOrUpdaterService(
+	ctx context.Context,
+	springBootApp *appv1.SpringBootApp,
+	labels map[string]string,
+) error {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      springBootApp.Name,
+			Namespace: springBootApp.Namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				"app": springBootApp.Name,
+			},
+		},
+	}
+
+	if springBootApp.Spec.Ports != nil {
+		var ports []corev1.ServicePort
+		for _, port := range springBootApp.Spec.Ports {
+			ports = append(ports, corev1.ServicePort{
+				Name:       "http",
+				Port:       port.ContainerPort,
+				TargetPort: intstr.IntOrString{IntVal: port.ContainerPort},
+			})
+		}
+
+		svc.Spec.Ports = ports
+	} else {
+		svc.Spec.Ports = []corev1.ServicePort{
+			{
+				Name:       "http",
+				Port:       8080,
+				TargetPort: intstr.IntOrString{IntVal: 8080},
+			},
+		}
+	}
+
+	if err := controllerutil.SetControllerReference(springBootApp, svc, r.Scheme); err != nil {
+		return err
+	}
+
+	foundedSvc := &corev1.Service{}
+	if err := r.Get(
+		ctx,
+		types.NamespacedName{Name: springBootApp.Name, Namespace: springBootApp.Namespace},
+		foundedSvc,
+	); err != nil {
+		if errors.IsNotFound(err) {
+			log.Info("Creating Service", "namespace", springBootApp.Namespace, "name", springBootApp.Name)
+			err = r.Create(ctx, svc)
+		}
+		return err
+	}
+
+	if !reflect.DeepEqual(foundedSvc.Spec.Ports, svc.Spec.Ports) {
+		foundedSvc.Spec.Ports = svc.Spec.Ports
+		log.Info("Updating Service", "namespace", foundedSvc.Namespace, "name", foundedSvc.Name)
+		err := r.Update(ctx, foundedSvc)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (r *SpringBootAppReconciler) createOrUpdateHPA(
+	ctx context.Context,
+	springBootApp *appv1.SpringBootApp,
+	labels map[string]string,
+) error {
+	// hpa
+	hpa := &autoscalingv1.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      springBootApp.Name,
+			Labels:    labels,
+			Namespace: springBootApp.Namespace,
+		},
+		Spec: autoscalingv1.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv1.CrossVersionObjectReference{
+				Kind:       "Deployment",
+				Name:       springBootApp.Name,
+				APIVersion: "apps/v1",
+			},
+		},
+	}
+
+	if springBootApp.Spec.MinReplicas != nil {
+		hpa.Spec.MinReplicas = springBootApp.Spec.MinReplicas
+	} else {
+		minReplicas := DefaultMinReplicas
+		hpa.Spec.MinReplicas = &minReplicas
+	}
+	if springBootApp.Spec.MaxReplicas != nil {
+		hpa.Spec.MaxReplicas = *springBootApp.Spec.MaxReplicas
+	} else {
+		hpa.Spec.MaxReplicas = DefaultMaxReplicas
+	}
+
+	if springBootApp.Spec.TargetCPUUtilizationPercentage != nil {
+		hpa.Spec.TargetCPUUtilizationPercentage = springBootApp.Spec.TargetCPUUtilizationPercentage
+	}
+
+	// SetControllerReference sets owner as a Controller OwnerReference on controlled.
+	if err := controllerutil.SetControllerReference(springBootApp, hpa, r.Scheme); err != nil {
+		return err
+	}
+
+	foundedHPA := &autoscalingv1.HorizontalPodAutoscaler{}
+	if err := r.Get(
+		ctx,
+		types.NamespacedName{Name: hpa.Name, Namespace: hpa.Namespace},
+		foundedHPA,
+	); err != nil {
+		if errors.IsNotFound(err) {
+			log.Info("Creating HorizontalPodAutoscaler", "namespace", hpa.Namespace, "name", hpa.Name)
+			err = r.Create(ctx, hpa)
+		}
+		return err
+	}
+
+	if foundedHPA.Spec.MinReplicas != hpa.Spec.MinReplicas ||
+		foundedHPA.Spec.MaxReplicas != hpa.Spec.MaxReplicas ||
+		foundedHPA.Spec.TargetCPUUtilizationPercentage != hpa.Spec.TargetCPUUtilizationPercentage {
+		foundedHPA.Spec.MinReplicas = hpa.Spec.MinReplicas
+		foundedHPA.Spec.MaxReplicas = hpa.Spec.MaxReplicas
+		foundedHPA.Spec.TargetCPUUtilizationPercentage = hpa.Spec.TargetCPUUtilizationPercentage
+		log.Info("Updating Service", "namespace", hpa.Namespace, "name", hpa.Name)
+		err := r.Update(ctx, foundedHPA)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func springBootContainer(springBootApp *appv1.SpringBootApp) corev1.Container {

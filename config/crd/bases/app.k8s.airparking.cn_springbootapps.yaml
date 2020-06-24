@@ -585,6 +585,9 @@ spec:
                     value. More info: https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/'
                   type: object
               type: object
+            targetCpuUtilizationPercentage:
+              format: int32
+              type: integer
             version:
               type: string
           required:

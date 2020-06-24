@@ -63,6 +63,9 @@ type SpringBootAppSpec struct {
 	MaxReplicas *int32 `json:"maxReplicas,omitempty"`
 
 	// +kubebuilder:validation:Optional
+	TargetCPUUtilizationPercentage *int32 `json:"targetCpuUtilizationPercentage,omitempty"`
+
+	// +kubebuilder:validation:Optional
 	PodAffinity *corev1.PodAffinity `json:"podAffinity,omitempty"`
 	// +kubebuilder:validation:Optional
 	PodAntiAffinity *corev1.PodAntiAffinity `json:"podAntiAffinity,omitempty"`

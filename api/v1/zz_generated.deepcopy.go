@@ -119,6 +119,11 @@ func (in *SpringBootAppSpec) DeepCopyInto(out *SpringBootAppSpec) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.TargetCPUUtilizationPercentage != nil {
+		in, out := &in.TargetCPUUtilizationPercentage, &out.TargetCPUUtilizationPercentage
+		*out = new(int32)
+		**out = **in
+	}
 	if in.PodAffinity != nil {
 		in, out := &in.PodAffinity, &out.PodAffinity
 		*out = new(corev1.PodAffinity)

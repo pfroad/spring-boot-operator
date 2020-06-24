@@ -9,8 +9,9 @@ spec:
   livenessProbePath: /actuator/health
   readinessProbePath: /actuator/health
   minReplicas: 1
-  maxReplicas: 2
+  maxReplicas: 3
   configMap: pmc-order-config
+  version: v1
   ports:
     - containerPort: 8080
       protocol: TCP
